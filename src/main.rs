@@ -1,23 +1,27 @@
 use futures_util::StreamExt;
-use hyper::{
-    client::{Client as HyperClient, HttpConnector},
-};
-use std::{sync::mpsc};
+use hyper::client::{Client as HyperClient, HttpConnector};
+use twilight_http::api_error::{GeneralApiError, ApiError};
+use twilight_http::error::ErrorType;
+use std::sync::mpsc;
+use std::time::Duration;
 use std::{
     collections::HashMap,
     env,
     future::Future,
-    io::{Write},
+    io::Write,
     process::{Command, Stdio},
     sync::{Arc, RwLock},
 };
+use tokio::io::AsyncWriteExt;
+use tracing::info;
 use twilight_gateway::{Event, Intents, Shard};
-use twilight_http::Client as HttpClient;
+use twilight_http::{Client as HttpClient};
 use twilight_model::{
     channel::{Channel, Message},
     http::attachment::Attachment,
     id::{
-        marker::{ChannelMarker, GuildMarker}, Id,
+        marker::{ChannelMarker, GuildMarker, UserMarker},
+        Id,
     },
 };
 use twilight_standby::Standby;
@@ -37,19 +41,25 @@ struct StateRef {
 fn spawn(fut: impl Future<Output = anyhow::Result<()>> + Send + 'static) {
     tokio::spawn(async move {
         if let Err(why) = fut.await {
-            tracing::debug!("handler error: {why:?}");
+            tracing::info!("handler error: {why:?}");
         }
     });
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    #[cfg(feature = "console")]
+    console_subscriber::init();
+
     // Initialize the tracing subscriber.
     tracing_subscriber::fmt::init();
 
     let (mut events, state) = {
         let token = env::var("DISCORD_TOKEN")?;
-        let http = HttpClient::new(token.clone());
+        let  http = twilight_http::Client::builder()
+            .token(token.clone())
+            .timeout(Duration::from_secs(30))
+            .build();
 
         let intents = Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT;
         let (shard, events) = Shard::new(token, intents).await?;
@@ -69,6 +79,7 @@ async fn main() -> anyhow::Result<()> {
 
     //let channels = state.http.guild_channels()
     let channels = Arc::new(RwLock::new(HashMap::new()));
+    let mut my_id = None;
 
     let _clip_regex = regex::Regex::new(r"https://clips.twitch.tv/[^\s]+");
     while let Some(event) = events.next().await {
@@ -83,10 +94,11 @@ async fn main() -> anyhow::Result<()> {
                         Arc::clone(&state),
                     ));
                 }
+                my_id = Some(ready.user.id);
                 continue;
             }
             Event::MessageCreate(msg) => {
-                if msg.guild_id.is_none() {
+                if msg.guild_id.is_none() || msg.author.bot || msg.author.id == my_id.unwrap() {
                     continue;
                 }
 
@@ -96,7 +108,7 @@ async fn main() -> anyhow::Result<()> {
                     .map(|guild_channels| guild_channels.get(&msg.channel_id))
                     .flatten()
                 {
-                    if channel_name != "sound-clips" {
+                    if channel_name != "new-twitch-clips-for-soundboard" {
                         continue;
                     }
                 } else {
@@ -104,7 +116,8 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
 
-                let clip_regex = regex::Regex::new(r"https://clips.twitch.tv/([^\s]+)").unwrap();
+                let clip_regex =
+                    regex::Regex::new(r#"https://(m\.)?clips\.twitch\.tv/[^\s"]+"#).unwrap();
                 if clip_regex.is_match(&msg.content) {
                     spawn(mirror(msg.0, Arc::clone(&state)));
                     continue;
@@ -146,44 +159,99 @@ async fn update_channels(
 }
 
 async fn mirror(msg: Message, state: State) -> anyhow::Result<()> {
-    let clip_regex = regex::Regex::new(r"https://(m\.)?clips\.twitch\.tv/[^\s]+").unwrap();
+    let clip_regex = regex::Regex::new(r#"https://(m\.)?clips\.twitch\.tv/[^\s"]+"#).unwrap();
+    let clip_title_sanitization = regex::Regex::new(r"[^a-zA-Z0-9_-]").unwrap();
 
     for cap in clip_regex.captures_iter(&msg.content) {
         let clip_url = &cap[0];
+        info!("Downloading {}", clip_url);
 
         let clip = twitch::download_clip(clip_url).await;
         if clip.is_none() {
             state
                 .http
                 .create_message(msg.channel_id)
+                .reply(msg.id)
                 .content(&format!("Could not download {:?}", clip_url))?
                 .exec()
                 .await?;
             continue;
         }
 
+        info!("Downloaded!");
+
         let clip = clip.unwrap();
+        info!("{} title: {}", clip_url, &clip.0);
+        let title = clip_title_sanitization.replace_all(clip.0.as_str(), "_");
+        info!("sanitized: {}", title);
         let audio_attachment = Attachment::from_bytes(
-            format!("{}.mp3", &clip.0),
-            extract_audio(clip.1.as_slice()),
+            format!("{}.mp3", title),
+            extract_audio(clip.1.as_slice()).await,
             2,
         );
-        let video_attachment = Attachment::from_bytes(format!("{}.mp4", &clip.0), clip.1, 1);
+        let video_too_large = clip.1.len() > 8 * 1000 * 1000;
+        let video_attachment = Attachment::from_bytes(format!("{}.mp4", title), clip.1, 1);
 
-        state
-            .http
-            .create_message(msg.channel_id)
-            .reply(msg.id)
-            .attachments(&[video_attachment, audio_attachment])?
-            .exec()
-            .await?;
+        info!("Sending message...");
+        macro_rules! video_too_large {
+            () => {
+                    state
+                        .http
+                        .create_message(msg.channel_id)
+                        .reply(msg.id)
+                        .content(&format!("Could not mirror {:?} due to file size constraints. You can download it yourself here: {}. Attempting to upload only audio.", clip_url, clip.2))?
+                        .exec()
+                        .await?;
+
+                        info!("Video was too large. Attemping to upload just audio.");
+                        let res = state
+                            .http
+                            .create_message(msg.channel_id)
+                            .reply(msg.id)
+                            .attachments(&[audio_attachment])?
+                            .exec()
+                            .await;
+                        if res.is_err() {
+                            state
+                                .http
+                                .create_message(msg.channel_id)
+                                .reply(msg.id)
+                                .content(&format!("Could not upload just audio for {:?} :(", clip_url))?
+                                .exec()
+                            .await?;
+                        }
+            }
+        }
+        if video_too_large {
+            video_too_large!();
+        } else {
+            let res = state
+                .http
+                .create_message(msg.channel_id)
+                .reply(msg.id)
+                .attachments(&[video_attachment, audio_attachment.clone()])?
+                .exec()
+                .await;
+            if let Err(e) = &res {
+                if let ErrorType::Response { body: _, error, status: _ } = e.kind() {
+                    if let ApiError::General( GeneralApiError { code: 40005, .. }) = error {
+                        video_too_large!();
+                    }
+                } else {
+                    res?;
+                }
+            }
+        }
+
+        info!("Message sent!");
     }
 
     Ok(())
 }
 
-fn extract_audio(data: &[u8]) -> Vec<u8> {
-    let mut child = Command::new("ffmpeg")
+async fn extract_audio(data: &[u8]) -> Vec<u8> {
+    info!("Extracting audio");
+    let mut child = tokio::process::Command::new("ffmpeg")
         .arg("-i")
         .arg("-")
         .arg("-f")
@@ -196,16 +264,25 @@ fn extract_audio(data: &[u8]) -> Vec<u8> {
         .expect("failed to spawn ffmpeg");
     let mut stdin = child.stdin.take().expect("Failed to open stdin");
 
-
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let output = child.wait_with_output().expect("Failed to read stdout");
-        tx.send(output.stdout).expect("failed to send tx data");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    tokio::spawn(async move {
+        info!("Waiting for output");
+        let output = child
+            .wait_with_output()
+            .await
+            .expect("Failed to read stdout");
+        tx.send(output.stdout)
+            .await
+            .expect("failed to send tx data");
     });
 
-    stdin.write_all(data).expect("failed to write mp4 to ffmpeg");
+    info!("Writing input mp4");
+    stdin
+        .write_all(data)
+        .await
+        .expect("failed to write mp4 to ffmpeg");
     drop(stdin);
+    info!("mp4 written");
 
-
-    rx.recv().expect("no mp3 data sent back?")
+    rx.recv().await.expect("no mp3 data sent back?")
 }

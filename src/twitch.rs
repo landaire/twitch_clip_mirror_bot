@@ -55,7 +55,7 @@ fn clip_thumbnail_url_to_video_url(thumbnail_url: &str) -> String {
     re.replace(thumbnail_url, ".mp4").into_owned()
 }
 
-pub async fn download_clip(clip_url: &str) -> Option<(String, Vec<u8>)> {
+pub async fn download_clip(clip_url: &str) -> Option<(String, Vec<u8>, String)> {
     let clip_url = reqwest::Url::parse(clip_url).expect("invalid URL");
 
     let clip = match GetClipsRequest::builder()
@@ -77,8 +77,9 @@ pub async fn download_clip(clip_url: &str) -> Option<(String, Vec<u8>)> {
     println!("{:?} {:?}", clip.title, clip.thumbnail_url);
 
     let client = get_client();
+    let mp4_url = clip_thumbnail_url_to_video_url(clip.thumbnail_url.as_str());
     match client
-        .get(clip_thumbnail_url_to_video_url(clip.thumbnail_url.as_str()))
+        .get(&mp4_url)
         .send()
         .await
     {
@@ -90,7 +91,7 @@ pub async fn download_clip(clip_url: &str) -> Option<(String, Vec<u8>)> {
                 .to_vec();
             let title = clip.title;
 
-            Some((title.as_str().to_owned(), content))
+            Some((title.as_str().to_owned(), content, mp4_url))
         }
         Err(e) => {
             panic!("{:?}", e);
