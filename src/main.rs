@@ -1,31 +1,23 @@
 use futures_util::StreamExt;
 use hyper::{
     client::{Client as HyperClient, HttpConnector},
-    Body, Request,
 };
-use std::{sync::mpsc, net::TcpListener};
+use std::{sync::mpsc};
 use std::{
     collections::HashMap,
     env,
     future::Future,
-    io::{Cursor, Write, BufWriter},
-    net::SocketAddr,
+    io::{Write},
     process::{Command, Stdio},
-    str::FromStr,
     sync::{Arc, RwLock},
 };
 use twilight_gateway::{Event, Intents, Shard};
 use twilight_http::Client as HttpClient;
 use twilight_model::{
     channel::{Channel, Message},
-    gateway::payload::{
-        incoming::{MessageCreate, UnavailableGuild},
-        outgoing::UpdateVoiceState,
-    },
     http::attachment::Attachment,
     id::{
-        marker::{ChannelMarker, GuildMarker},
-        ChannelId, Id,
+        marker::{ChannelMarker, GuildMarker}, Id,
     },
 };
 use twilight_standby::Standby;
@@ -78,7 +70,7 @@ async fn main() -> anyhow::Result<()> {
     //let channels = state.http.guild_channels()
     let channels = Arc::new(RwLock::new(HashMap::new()));
 
-    let clip_regex = regex::Regex::new(r"https://clips.twitch.tv/[^\s]+");
+    let _clip_regex = regex::Regex::new(r"https://clips.twitch.tv/[^\s]+");
     while let Some(event) = events.next().await {
         state.standby.process(&event);
 
@@ -205,7 +197,7 @@ fn extract_audio(data: &[u8]) -> Vec<u8> {
     let mut stdin = child.stdin.take().expect("Failed to open stdin");
 
 
-    let (tx, mut rx) = mpsc::channel();
+    let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let output = child.wait_with_output().expect("Failed to read stdout");
         tx.send(output.stdout).expect("failed to send tx data");

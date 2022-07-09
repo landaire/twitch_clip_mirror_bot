@@ -3,13 +3,13 @@ use regex::Regex;
 use std::env;
 use std::sync::Arc;
 use twitch_api_rs::auth::client_credentials::{
-    ClientAuthRequest, ClientAuthResponse, ClientAuthToken,
+    ClientAuthRequest, ClientAuthToken,
 };
 use twitch_api_rs::auth::{ClientId, ClientSecret};
 use twitch_api_rs::prelude::*;
 use twitch_api_rs::resource::clips::get_clips::*;
-use twitch_api_rs::resource::clips::ClipInfo;
-use twitch_api_rs::values::clips::ClipTitle;
+
+
 
 static REQWEST_CLIENT: OnceCell<Arc<reqwest::Client>> = OnceCell::new();
 
