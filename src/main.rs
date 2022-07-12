@@ -52,6 +52,7 @@ async fn main() -> anyhow::Result<()> {
     console_subscriber::init();
 
     // Initialize the tracing subscriber.
+    #[cfg(not(feature = "console"))]
     tracing_subscriber::fmt::init();
 
     let (mut events, state) = {
@@ -77,7 +78,8 @@ async fn main() -> anyhow::Result<()> {
         )
     };
 
-    //let channels = state.http.guild_channels()
+    // TODO: Channels get out of sync if they're renamed or and possibly if new permissions are
+    // granted.
     let channels = Arc::new(RwLock::new(HashMap::new()));
     let mut my_id = None;
 
@@ -117,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
                 }
 
                 let clip_regex =
-                    regex::Regex::new(r#"https://(m\.)?clips\.twitch\.tv/[^\s"]+"#).unwrap();
+                    regex::Regex::new(r#"https://(m\.)?clips\.twitch\.tv/[^\s"']+"#).unwrap();
                 if clip_regex.is_match(&msg.content) {
                     spawn(mirror(msg.0, Arc::clone(&state)));
                     continue;
@@ -195,22 +197,15 @@ async fn mirror(msg: Message, state: State) -> anyhow::Result<()> {
         info!("Sending message...");
         macro_rules! video_too_large {
             () => {
-                    state
+                    let res = state
                         .http
                         .create_message(msg.channel_id)
                         .reply(msg.id)
-                        .content(&format!("Could not mirror {:?} due to file size constraints. You can download it yourself here: {}. Attempting to upload only audio.", clip_url, clip.2))?
+                        .content(&format!("Could not mirror {:?} due to file size constraints. You can download it yourself here: {}. Uploading only audio.", clip_url, clip.2))?
+                        .attachments(&[audio_attachment])?
                         .exec()
-                        .await?;
+                        .await;
 
-                        info!("Video was too large. Attemping to upload just audio.");
-                        let res = state
-                            .http
-                            .create_message(msg.channel_id)
-                            .reply(msg.id)
-                            .attachments(&[audio_attachment])?
-                            .exec()
-                            .await;
                         if res.is_err() {
                             state
                                 .http
