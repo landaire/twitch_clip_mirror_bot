@@ -1,13 +1,13 @@
 use futures_util::StreamExt;
 use hyper::client::{Client as HyperClient, HttpConnector};
-use std::sync::mpsc;
+
 use std::time::Duration;
 use std::{
     collections::HashMap,
     env,
     future::Future,
     io::Write,
-    process::{Command, Stdio},
+    process::{Stdio},
     sync::{Arc, RwLock},
 };
 use tokio::io::AsyncWriteExt;
@@ -20,7 +20,7 @@ use twilight_model::{
     channel::{Channel, Message},
     http::attachment::Attachment,
     id::{
-        marker::{ChannelMarker, GuildMarker, UserMarker},
+        marker::{ChannelMarker, GuildMarker},
         Id,
     },
 };
