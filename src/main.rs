@@ -1,7 +1,5 @@
 use futures_util::StreamExt;
 use hyper::client::{Client as HyperClient, HttpConnector};
-use twilight_http::api_error::{GeneralApiError, ApiError};
-use twilight_http::error::ErrorType;
 use std::sync::mpsc;
 use std::time::Duration;
 use std::{
@@ -15,7 +13,9 @@ use std::{
 use tokio::io::AsyncWriteExt;
 use tracing::info;
 use twilight_gateway::{Event, Intents, Shard};
-use twilight_http::{Client as HttpClient};
+use twilight_http::api_error::{ApiError, GeneralApiError};
+use twilight_http::error::ErrorType;
+use twilight_http::Client as HttpClient;
 use twilight_model::{
     channel::{Channel, Message},
     http::attachment::Attachment,
@@ -57,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
 
     let (mut events, state) = {
         let token = env::var("DISCORD_TOKEN")?;
-        let  http = twilight_http::Client::builder()
+        let http = twilight_http::Client::builder()
             .token(token.clone())
             .timeout(Duration::from_secs(30))
             .build();
@@ -228,8 +228,13 @@ async fn mirror(msg: Message, state: State) -> anyhow::Result<()> {
                 .exec()
                 .await;
             if let Err(e) = &res {
-                if let ErrorType::Response { body: _, error, status: _ } = e.kind() {
-                    if let ApiError::General( GeneralApiError { code: 40005, .. }) = error {
+                if let ErrorType::Response {
+                    body: _,
+                    error,
+                    status: _,
+                } = e.kind()
+                {
+                    if let ApiError::General(GeneralApiError { code: 40005, .. }) = error {
                         video_too_large!();
                     }
                 } else {

@@ -2,14 +2,10 @@ use once_cell::sync::OnceCell;
 use regex::Regex;
 use std::env;
 use std::sync::Arc;
-use twitch_api_rs::auth::client_credentials::{
-    ClientAuthRequest, ClientAuthToken,
-};
+use twitch_api_rs::auth::client_credentials::{ClientAuthRequest, ClientAuthToken};
 use twitch_api_rs::auth::{ClientId, ClientSecret};
 use twitch_api_rs::prelude::*;
 use twitch_api_rs::resource::clips::get_clips::*;
-
-
 
 static REQWEST_CLIENT: OnceCell<Arc<reqwest::Client>> = OnceCell::new();
 
@@ -78,11 +74,7 @@ pub async fn download_clip(clip_url: &str) -> Option<(String, Vec<u8>, String)> 
 
     let client = get_client();
     let mp4_url = clip_thumbnail_url_to_video_url(clip.thumbnail_url.as_str());
-    match client
-        .get(&mp4_url)
-        .send()
-        .await
-    {
+    match client.get(&mp4_url).send().await {
         Ok(resp) => {
             let content = resp
                 .bytes()
