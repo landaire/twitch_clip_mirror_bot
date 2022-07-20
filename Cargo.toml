@@ -49,6 +49,8 @@ twilight-http = { version = "0.11", default-features = false, features = [
 twilight-model = "0.11"
 twilight-standby = "0.11"
 console-subscriber = {version = "0.1", optional = true}
+toml = "0.5"
+
 
 [features]
 default = []

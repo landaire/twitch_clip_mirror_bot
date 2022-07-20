@@ -47,8 +47,27 @@ async fn get_auth_token() -> Arc<ClientAuthToken> {
 }
 
 fn clip_thumbnail_url_to_video_url(thumbnail_url: &str) -> String {
-    let re = Regex::new(r"-preview.+").unwrap();
+    let re = Regex::new(r"(-social)?-preview.+").unwrap();
     re.replace(thumbnail_url, ".mp4").into_owned()
+}
+
+pub async fn download_clip_from_thumbnail_url(thumbnail_url: &str) -> Option<(Vec<u8>, String)> {
+    let client = get_client();
+    let mp4_url = clip_thumbnail_url_to_video_url(thumbnail_url);
+    match client.get(&mp4_url).send().await {
+        Ok(resp) => {
+            let content = resp
+                .bytes()
+                .await
+                .expect("Failed to get response bytes")
+                .to_vec();
+
+            Some((content, mp4_url))
+        }
+        Err(e) => {
+            panic!("{:?}", e);
+        }
+    }
 }
 
 pub async fn download_clip(clip_url: &str) -> Option<(String, Vec<u8>, String)> {
@@ -72,21 +91,7 @@ pub async fn download_clip(clip_url: &str) -> Option<(String, Vec<u8>, String)> 
 
     println!("{:?} {:?}", clip.title, clip.thumbnail_url);
 
-    let client = get_client();
-    let mp4_url = clip_thumbnail_url_to_video_url(clip.thumbnail_url.as_str());
-    match client.get(&mp4_url).send().await {
-        Ok(resp) => {
-            let content = resp
-                .bytes()
-                .await
-                .expect("Failed to get response bytes")
-                .to_vec();
-            let title = clip.title;
-
-            Some((title.as_str().to_owned(), content, mp4_url))
-        }
-        Err(e) => {
-            panic!("{:?}", e);
-        }
-    }
+    download_clip_from_thumbnail_url(clip.thumbnail_url.as_str())
+        .await
+        .map(|(content, mp4_url)| (clip.title.as_str().to_owned(), content, mp4_url))
 }

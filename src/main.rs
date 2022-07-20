@@ -1,3 +1,5 @@
+#![feature(let_chains)]
+
 use futures_util::StreamExt;
 use hyper::client::{Client as HyperClient, HttpConnector};
 
@@ -7,7 +9,7 @@ use std::{
     env,
     future::Future,
     io::Write,
-    process::{Stdio},
+    process::Stdio,
     sync::{Arc, RwLock},
 };
 use tokio::io::AsyncWriteExt;
@@ -26,6 +28,7 @@ use twilight_model::{
 };
 use twilight_standby::Standby;
 
+mod config;
 mod twitch;
 
 type State = Arc<StateRef>;
@@ -168,8 +171,27 @@ async fn mirror(msg: Message, state: State) -> anyhow::Result<()> {
         let clip_url = &cap[0];
         info!("Downloading {}", clip_url);
 
-        let clip = twitch::download_clip(clip_url).await;
+        let mut clip = twitch::download_clip(clip_url).await;
         if clip.is_none() {
+            // the clip was empty, we need to try getting its details from the message
+            // embed content
+            for embed in &msg.embeds {
+                if let Some(provider) = &embed.provider &&
+                    let Some("Twitch") = provider.name.as_ref().map(String::as_str) &&
+                        let Some(title) = &embed.title &&
+                        let Some(thumbnail) = &embed.thumbnail {
+                            clip = twitch::download_clip_from_thumbnail_url(
+                                thumbnail.url.as_str(),
+                            )
+                            .await
+                            .map(|(contents, video_url)| (title.clone(), contents, video_url));
+                            break;
+                        }
+            }
+        }
+
+        if clip.is_none() {
+            // Try downloading based off of the discord rich preview metadata
             state
                 .http
                 .create_message(msg.channel_id)
