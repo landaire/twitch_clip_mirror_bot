@@ -219,38 +219,122 @@ async fn mirror(msg: Message, state: State) -> anyhow::Result<()> {
         let video_attachment = Attachment::from_bytes(format!("{}.mp4", title), clip.1, 1);
 
         info!("Sending message...");
+
+        let mirrored_channel = {
+            let server_config_lock = state.server_config.read().expect("lock is poisoned");
+            config_for_server(msg.guild_id.unwrap(), &*server_config_lock).and_then(
+                |server_config| {
+                    server_config
+                        .channel(msg.channel_id)
+                        .and_then(|channel_config| channel_config.mirror_channel)
+                },
+            )
+        };
+
         macro_rules! video_too_large {
             () => {
+                let res = if let Some(mirrored_channel_id) = mirrored_channel {
                     let res = state
+                        .http
+                        .create_message(mirrored_channel_id)
+                        .content(&format!(
+                            "Posted by <@{}> at https://discord.com/channels/{}/{}/{}. Could upload video for {:?} due to file size constraints. You can download it yourself here: {}. Uploading only audio.",
+                            msg.author.id,
+                            msg.guild_id.unwrap(),
+                            msg.channel_id,
+                            msg.id,
+                            clip_url,
+                            clip.2
+                        ))?
+                        .attachments(&[audio_attachment.clone()])?
+                        .exec()
+                        .await;
+
+                    if res.is_err() {
+                        res
+                    } else {
+
+
+                    let mirror_message: Message = res.unwrap().model().await?;
+
+                    state
+                        .http
+                        .create_message(msg.channel_id)
+                        .reply(msg.id)
+                        .content(&format!(
+                            "Audio mirror can be found at https://discord.com/channels/{}/{}/{}",
+                            msg.guild_id.unwrap(),
+                            mirror_message.channel_id,
+                            mirror_message.id,
+                        ))?
+                        .exec()
+                        .await
+                    }
+                } else {
+                    state
                         .http
                         .create_message(msg.channel_id)
                         .reply(msg.id)
                         .content(&format!("Could not mirror {:?} due to file size constraints. You can download it yourself here: {}. Uploading only audio.", clip_url, clip.2))?
                         .attachments(&[audio_attachment])?
                         .exec()
-                        .await;
+                        .await
+                };
 
-                        if res.is_err() {
-                            state
-                                .http
-                                .create_message(msg.channel_id)
-                                .reply(msg.id)
-                                .content(&format!("Could not upload just audio for {:?} :(", clip_url))?
-                                .exec()
-                            .await?;
-                        }
+                if res.is_err() {
+                    state
+                        .http
+                        .create_message(msg.channel_id)
+                        .reply(msg.id)
+                        .content(&format!("Could not upload just audio for {:?} :(", clip_url))?
+                        .exec()
+                    .await?;
+                }
             }
         }
+
         if video_too_large {
             video_too_large!();
         } else {
-            let res = state
-                .http
-                .create_message(msg.channel_id)
-                .reply(msg.id)
-                .attachments(&[video_attachment, audio_attachment.clone()])?
-                .exec()
-                .await;
+            let res = if let Some(mirrored_channel_id) = mirrored_channel {
+                let res = state
+                    .http
+                    .create_message(mirrored_channel_id)
+                    .content(&format!(
+                        "Posted by <@{}> at https://discord.com/channels/{}/{}/{}",
+                        msg.author.id,
+                        msg.guild_id.unwrap(),
+                        msg.channel_id,
+                        msg.id,
+                    ))?
+                    .attachments(&[video_attachment, audio_attachment.clone()])?
+                    .exec()
+                    .await?;
+
+                let mirror_message: Message = res.model().await?;
+
+                state
+                    .http
+                    .create_message(msg.channel_id)
+                    .reply(msg.id)
+                    .content(&format!(
+                        "Mirror can be found at https://discord.com/channels/{}/{}/{}",
+                        msg.guild_id.unwrap(),
+                        mirror_message.channel_id,
+                        mirror_message.id,
+                    ))?
+                    .exec()
+                    .await
+            } else {
+                state
+                    .http
+                    .create_message(msg.channel_id)
+                    .reply(msg.id)
+                    .attachments(&[video_attachment, audio_attachment.clone()])?
+                    .exec()
+                    .await
+            };
+
             if let Err(e) = &res {
                 if let ErrorType::Response {
                     body: _,
@@ -456,15 +540,9 @@ async fn handle_command(msg: Message, state: State) -> anyhow::Result<()> {
                         .parse::<u64>()
                         .expect("failed to convert the channel ID to an integer");
 
-                    println!("channel id is {}", channel_id);
-
                     let channel_list = state.http.guild_channels(guild_id).exec().await?;
                     let channels: Vec<Channel> = channel_list.models().await?;
                     let channel_info = channels.iter().find_map(|channel| {
-                        println!(
-                            "enumerated_name = {:?}, channel_name = {:?}",
-                            channel.name, channel_id
-                        );
                         if channel.id == channel_id {
                             Some((channel.id, channel.name.clone()))
                         } else {
@@ -543,7 +621,7 @@ async fn handle_command(msg: Message, state: State) -> anyhow::Result<()> {
                         .await?;
                 }
             } else {
-                state
+                let res = state
                     .http
                     .create_message(msg.channel_id)
                     .reply(msg.id)

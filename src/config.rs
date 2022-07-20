@@ -41,6 +41,18 @@ impl ServerConfig {
 
         self.monitored_channels.last_mut().unwrap()
     }
+
+    pub fn channel(&self, channel_id: Id<ChannelMarker>) -> Option<&Channel> {
+        if let Some(position) = self
+            .monitored_channels
+            .iter()
+            .position(|channel| channel.id == channel_id)
+        {
+            return Some(&self.monitored_channels[position]);
+        }
+
+        None
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
