@@ -1,7 +1,10 @@
 #![feature(let_chains)]
 
+use config::{load_config, write_config, Config, ServerConfig};
 use futures_util::StreamExt;
 use hyper::client::{Client as HyperClient, HttpConnector};
+use log::warn;
+use twilight_model::guild::{PartialMember, Permissions, Role};
 
 use std::time::Duration;
 use std::{
@@ -39,6 +42,7 @@ struct StateRef {
     hyper: HyperClient<HttpConnector>,
     shard: Shard,
     standby: Standby,
+    server_config: RwLock<Config>,
 }
 
 fn spawn(fut: impl Future<Output = anyhow::Result<()>> + Send + 'static) {
@@ -57,6 +61,8 @@ async fn main() -> anyhow::Result<()> {
     // Initialize the tracing subscriber.
     #[cfg(not(feature = "console"))]
     tracing_subscriber::fmt::init();
+
+    let config: Config = load_config();
 
     let (mut events, state) = {
         let token = env::var("DISCORD_TOKEN")?;
@@ -77,49 +83,63 @@ async fn main() -> anyhow::Result<()> {
                 hyper: HyperClient::new(),
                 shard,
                 standby: Standby::new(),
+                server_config: RwLock::new(config),
             }),
         )
     };
 
-    // TODO: Channels get out of sync if they're renamed or and possibly if new permissions are
-    // granted.
-    let channels = Arc::new(RwLock::new(HashMap::new()));
     let mut my_id = None;
 
-    let _clip_regex = regex::Regex::new(r"https://clips.twitch.tv/[^\s]+");
     while let Some(event) = events.next().await {
         state.standby.process(&event);
 
         match event {
             Event::Ready(ready) => {
-                for guild in ready.guilds {
-                    spawn(update_channels(
-                        guild.id,
-                        channels.clone(),
-                        Arc::clone(&state),
-                    ));
-                }
                 my_id = Some(ready.user.id);
                 continue;
             }
             Event::MessageCreate(msg) => {
+                if is_command(&msg) {
+                    spawn(handle_command(msg.0, Arc::clone(&state)));
+                    continue;
+                }
+
                 if msg.guild_id.is_none() || msg.author.bot || msg.author.id == my_id.unwrap() {
                     continue;
                 }
 
-                let cached_channels = channels.read().expect("lock poisoned");
-                if let Some(channel_name) = cached_channels
-                    .get(msg.guild_id.as_ref().unwrap())
-                    .map(|guild_channels| guild_channels.get(&msg.channel_id))
-                    .flatten()
-                {
-                    if channel_name != "new-twitch-clips-for-soundboard" {
-                        continue;
-                    }
-                } else {
-                    // we don't know about this channel?
+                let server_id = msg.guild_id.unwrap();
+
+                let config = state.server_config.read().unwrap();
+                let server_config = config.servers.iter().find(|server| server.id == server_id);
+                if server_config.is_none() {
                     continue;
                 }
+
+                let server_config = server_config.unwrap();
+
+                let should_post_in_channel = server_config
+                    .monitored_channels
+                    .iter()
+                    .any(|channel| channel.id == msg.channel_id);
+
+                if !should_post_in_channel {
+                    continue;
+                }
+
+                // let cached_channels = channels.read().expect("lock poisoned");
+                // if let Some(channel_name) = cached_channels
+                //     .get(msg.guild_id.as_ref().unwrap())
+                //     .map(|guild_channels| guild_channels.get(&msg.channel_id))
+                //     .flatten()
+                // {
+                //     if channel_name != "new-twitch-clips-for-soundboard" {
+                //         continue;
+                //     }
+                // } else {
+                //     // we don't know about this channel?
+                //     continue;
+                // }
 
                 let clip_regex =
                     regex::Regex::new(r#"https://(m\.)?clips\.twitch\.tv/[^\s"']+"#).unwrap();
@@ -129,35 +149,13 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             Event::MemberUpdate(update) => {
-                spawn(update_channels(
-                    update.guild_id,
-                    channels.clone(),
-                    Arc::clone(&state),
-                ));
+                // spawn(update_channels(update.guild_id, Arc::clone(&state)));
                 continue;
             }
             _ => {
                 // do not care
             }
         }
-    }
-
-    Ok(())
-}
-
-async fn update_channels(
-    id: Id<GuildMarker>,
-    cached_channels: Arc<RwLock<HashMap<Id<GuildMarker>, HashMap<Id<ChannelMarker>, String>>>>,
-    state: State,
-) -> anyhow::Result<()> {
-    let channel_list = state.http.guild_channels(id).exec().await?;
-    let channels: Vec<Channel> = channel_list.models().await?;
-    let mut cached_channels = cached_channels.write().expect("lock poisoned");
-    for channel in channels {
-        cached_channels
-            .entry(id)
-            .or_insert(HashMap::default())
-            .insert(channel.id, channel.name.expect("channel has no name"));
     }
 
     Ok(())
@@ -307,4 +305,227 @@ async fn extract_audio(data: &[u8]) -> Vec<u8> {
     info!("mp4 written");
 
     rx.recv().await.expect("no mp3 data sent back?")
+}
+
+fn is_command(msg: &Message) -> bool {
+    msg.content.starts_with("!")
+}
+
+fn config_for_server(server_id: Id<GuildMarker>, config: &Config) -> Option<&ServerConfig> {
+    config.servers.iter().find(|server| server.id == server_id)
+}
+
+/// Returns the server config corresponding to the given `server_id`. This will
+/// create the config if it does not exist.
+fn config_for_server_mut(server_id: Id<GuildMarker>, config: &mut Config) -> &mut ServerConfig {
+    if let Some(position) = config
+        .servers
+        .iter()
+        .position(|server| server.id == server_id)
+    {
+        return &mut config.servers[position];
+    }
+
+    let server_config = ServerConfig {
+        id: server_id,
+        monitored_channels: vec![],
+    };
+
+    config.servers.push(server_config);
+
+    config.servers.last_mut().unwrap()
+}
+
+async fn user_is_admin(message: &Message, state: State) -> anyhow::Result<bool> {
+    let get_roles = state.http.roles(message.guild_id.unwrap()).exec().await?;
+    let roles: Vec<Role> = get_roles.models().await?;
+
+    for role in roles {
+        if role.permissions.contains(Permissions::ADMINISTRATOR) {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+async fn handle_command(msg: Message, state: State) -> anyhow::Result<()> {
+    let mut msg_parts = msg.content[1..].split_ascii_whitespace();
+    let guild_id = msg.guild_id.expect("message has no guild association?");
+    println!("{:#?}", msg);
+    match msg_parts.next().unwrap() {
+        "watch_channel" => {
+            if !user_is_admin(&msg, Arc::clone(&state)).await? {
+                info!("User is not an admin -- ignoring command");
+                return Ok(());
+            }
+
+            let channel_name = msg_parts.next();
+            let channel_id = match channel_name {
+                Some(mut channel_name) => {
+                    if channel_name.starts_with('#') {
+                        channel_name = &channel_name[1..];
+                    }
+
+                    let channel_list = state.http.guild_channels(guild_id).exec().await?;
+                    let channels: Vec<Channel> = channel_list.models().await?;
+                    let channel_id = channels.iter().find_map(|channel| {
+                        if let Some(enumerated_name) = &channel.name && enumerated_name == channel_name {
+                            Some(channel.id)
+                        } else {
+                            None
+                        }
+                    });
+
+                    match channel_id {
+                        Some(channel_id) => channel_id,
+                        None => {
+                            state
+                                .http
+                                .create_message(msg.channel_id)
+                                .reply(msg.id)
+                                .content(&format!(
+                                    "No channel found by the name of {:?}",
+                                    channel_name
+                                ))?
+                                .exec()
+                                .await?;
+
+                            return Ok(());
+                        }
+                    }
+                }
+                None => msg.channel_id,
+            };
+
+            // Explicit new scope so that we don't hold a lock past an `await`
+            {
+                let mut config_lock = state.server_config.write().unwrap();
+                let server_config = config_for_server_mut(guild_id, &mut config_lock);
+                server_config.get_or_create_channel(channel_id);
+
+                write_config(&config_lock);
+            }
+
+            if let Some(channel_name) = channel_name {
+                state
+                    .http
+                    .create_message(msg.channel_id)
+                    .reply(msg.id)
+                    .content(&format!(
+                        "Watching channel #{} for Twitch clips",
+                        channel_name
+                    ))?
+                    .exec()
+                    .await?;
+            } else {
+                state
+                    .http
+                    .create_message(msg.channel_id)
+                    .reply(msg.id)
+                    .content("Watching current channel for Twitch clips")?
+                    .exec()
+                    .await?;
+            }
+
+            Ok(())
+        }
+        "mirror_channel" => {
+            // Ensure that the person executing this command is an admin
+            if !user_is_admin(&msg, Arc::clone(&state)).await? {
+                info!("User is not an admin -- ignoring command");
+                return Ok(());
+            }
+
+            let channel_name = msg_parts.next();
+            let (channel_id, channel_name) = match channel_name {
+                Some(mut channel_id) => {
+                    if channel_id.starts_with("<#") && channel_id.ends_with('>') {
+                        channel_id = channel_id.strip_prefix("<#").unwrap();
+                        channel_id = channel_id.strip_suffix('>').unwrap();
+                    }
+
+                    let channel_id = u64::from_str_radix(channel_id, 10)
+                        .expect("failed to convert the channel ID to an integer");
+
+                    println!("channel id is {}", channel_id);
+
+                    let channel_list = state.http.guild_channels(guild_id).exec().await?;
+                    let channels: Vec<Channel> = channel_list.models().await?;
+                    let channel_info = channels.iter().find_map(|channel| {
+                        println!(
+                            "enumerated_name = {:?}, channel_name = {:?}",
+                            channel.name, channel_id
+                        );
+                        if channel.id == channel_id {
+                            Some((channel.id, channel.name.clone()))
+                        } else {
+                            None
+                        }
+                    });
+
+                    match channel_info {
+                        Some(metadata) => metadata,
+                        None => {
+                            return Ok(());
+                        }
+                    }
+                }
+                None => {
+                    state
+                        .http
+                        .create_message(msg.channel_id)
+                        .reply(msg.id)
+                        .content("No channel name specified. Usage: !mirror_channel #channel_name")?
+                        .exec()
+                        .await?;
+
+                    return Ok(());
+                }
+            };
+
+            // Explicit new scope so that we don't hold a lock past an `await`
+            {
+                let mut config_lock = state.server_config.write().unwrap();
+                let server_config = config_for_server_mut(guild_id, &mut config_lock);
+                let channel_config = server_config.get_or_create_channel(msg.channel_id);
+                channel_config.mirror_channel = Some(channel_id);
+
+                write_config(&config_lock);
+            }
+
+            if let Some(channel_name) = channel_name {
+                state
+                    .http
+                    .create_message(msg.channel_id)
+                    .reply(msg.id)
+                    .content(&format!(
+                        "Mirrored Twitch clips will now be posted in #{}",
+                        channel_name
+                    ))?
+                    .exec()
+                    .await?;
+            }
+
+            Ok(())
+        }
+        "mirror" => {
+            if let Some(referenced_message) = msg.referenced_message {
+                mirror(*referenced_message, state).await?;
+            } else {
+                state
+                    .http
+                    .create_message(msg.channel_id)
+                    .reply(msg.id)
+                    .content("Use the !mirror command in reply to a message with a Twitch link")?
+                    .exec()
+                    .await?;
+            }
+            Ok(())
+        }
+        other => {
+            warn!("command {:?} is not handled by our bot", other);
+            Ok(())
+        }
+    }
 }

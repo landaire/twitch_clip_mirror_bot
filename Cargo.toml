@@ -32,6 +32,7 @@ tokio = { default-features = false, features = [
     "macros",
     "process",
     "rt-multi-thread",
+    "fs"
 ], version = "1.0" }
 tracing = "0.1"
 tracing-subscriber = { default-features = false, features = [
