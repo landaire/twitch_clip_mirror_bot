@@ -237,7 +237,7 @@ async fn mirror(msg: Message, guild_id: Id<GuildMarker>, state: State) -> anyhow
                         .http
                         .create_message(mirrored_channel_id)
                         .content(&format!(
-                            "Posted by <@{}> at https://discord.com/channels/{}/{}/{}. Could upload video for {:?} due to file size constraints. You can download it yourself here: {}. Uploading only audio.",
+                            "Posted by <@{}> at https://discord.com/channels/{}/{}/{}. Couldn't upload video for {:?} due to file size constraints. You can download it yourself here: {}. Uploading only audio.",
                             msg.author.id,
                             guild_id,
                             msg.channel_id,
