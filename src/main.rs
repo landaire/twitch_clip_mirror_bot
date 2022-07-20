@@ -6,6 +6,7 @@ use hyper::client::{Client as HyperClient, HttpConnector};
 use log::warn;
 use twilight_model::guild::{PartialMember, Permissions, Role};
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use std::{
     collections::HashMap,
@@ -43,6 +44,7 @@ struct StateRef {
     shard: Shard,
     standby: Standby,
     server_config: RwLock<Config>,
+    my_id: AtomicU64,
 }
 
 fn spawn(fut: impl Future<Output = anyhow::Result<()>> + Send + 'static) {
@@ -84,18 +86,17 @@ async fn main() -> anyhow::Result<()> {
                 shard,
                 standby: Standby::new(),
                 server_config: RwLock::new(config),
+                my_id: AtomicU64::new(0),
             }),
         )
     };
-
-    let mut my_id = None;
 
     while let Some(event) = events.next().await {
         state.standby.process(&event);
 
         match event {
             Event::Ready(ready) => {
-                my_id = Some(ready.user.id);
+                state.my_id.store(ready.user.id.into(), Ordering::Relaxed);
                 continue;
             }
             Event::MessageCreate(msg) => {
@@ -104,7 +105,10 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
 
-                if msg.guild_id.is_none() || msg.author.bot || msg.author.id == my_id.unwrap() {
+                if msg.guild_id.is_none()
+                    || msg.author.bot
+                    || msg.author.id == state.my_id.load(Ordering::Relaxed)
+                {
                     continue;
                 }
 
@@ -352,13 +356,20 @@ async fn user_is_admin(message: &Message, state: State) -> anyhow::Result<bool> 
 async fn handle_command(msg: Message, state: State) -> anyhow::Result<()> {
     let mut msg_parts = msg.content[1..].split_ascii_whitespace();
     let guild_id = msg.guild_id.expect("message has no guild association?");
-    println!("{:#?}", msg);
-    match msg_parts.next().unwrap() {
-        "watch_channel" => {
+
+    macro_rules! permission_check {
+        () => {
+            // Ensure that the person executing this command is an admin
             if !user_is_admin(&msg, Arc::clone(&state)).await? {
                 info!("User is not an admin -- ignoring command");
                 return Ok(());
             }
+        };
+    }
+
+    match msg_parts.next().unwrap() {
+        "watch_channel" => {
+            permission_check!();
 
             let channel_name = msg_parts.next();
             let channel_id = match channel_name {
@@ -431,11 +442,7 @@ async fn handle_command(msg: Message, state: State) -> anyhow::Result<()> {
             Ok(())
         }
         "mirror_channel" => {
-            // Ensure that the person executing this command is an admin
-            if !user_is_admin(&msg, Arc::clone(&state)).await? {
-                info!("User is not an admin -- ignoring command");
-                return Ok(());
-            }
+            permission_check!();
 
             let channel_name = msg_parts.next();
             let (channel_id, channel_name) = match channel_name {
@@ -445,7 +452,8 @@ async fn handle_command(msg: Message, state: State) -> anyhow::Result<()> {
                         channel_id = channel_id.strip_suffix('>').unwrap();
                     }
 
-                    let channel_id = u64::from_str_radix(channel_id, 10)
+                    let channel_id = channel_id
+                        .parse::<u64>()
                         .expect("failed to convert the channel ID to an integer");
 
                     println!("channel id is {}", channel_id);
@@ -521,6 +529,29 @@ async fn handle_command(msg: Message, state: State) -> anyhow::Result<()> {
                     .exec()
                     .await?;
             }
+            Ok(())
+        }
+        "delete" => {
+            permission_check!();
+
+            if let Some(referenced_message) = msg.referenced_message {
+                if referenced_message.author.id == state.my_id.load(Ordering::Relaxed) {
+                    state
+                        .http
+                        .delete_message(referenced_message.channel_id, referenced_message.id)
+                        .exec()
+                        .await?;
+                }
+            } else {
+                state
+                    .http
+                    .create_message(msg.channel_id)
+                    .reply(msg.id)
+                    .content("Use the !mirror command in reply to a message with a Twitch link")?
+                    .exec()
+                    .await?;
+            }
+
             Ok(())
         }
         other => {
