@@ -148,7 +148,8 @@ async fn main() -> anyhow::Result<()> {
                 let clip_regex =
                     regex::Regex::new(r#"https://(m\.)?clips\.twitch\.tv/[^\s"']+"#).unwrap();
                 if clip_regex.is_match(&msg.content) {
-                    spawn(mirror(msg.0, Arc::clone(&state)));
+                    let guild_id = msg.0.guild_id.unwrap();
+                    spawn(mirror(msg.0, guild_id, Arc::clone(&state)));
                     continue;
                 }
             }
@@ -165,7 +166,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn mirror(msg: Message, state: State) -> anyhow::Result<()> {
+async fn mirror(msg: Message, guild_id: Id<GuildMarker>, state: State) -> anyhow::Result<()> {
     let clip_regex = regex::Regex::new(r#"https://(m\.)?clips\.twitch\.tv/[^\s"]+"#).unwrap();
     let clip_title_sanitization = regex::Regex::new(r"[^a-zA-Z0-9_-]").unwrap();
 
@@ -222,13 +223,11 @@ async fn mirror(msg: Message, state: State) -> anyhow::Result<()> {
 
         let mirrored_channel = {
             let server_config_lock = state.server_config.read().expect("lock is poisoned");
-            config_for_server(msg.guild_id.unwrap(), &*server_config_lock).and_then(
-                |server_config| {
-                    server_config
-                        .channel(msg.channel_id)
-                        .and_then(|channel_config| channel_config.mirror_channel)
-                },
-            )
+            config_for_server(guild_id, &*server_config_lock).and_then(|server_config| {
+                server_config
+                    .channel(msg.channel_id)
+                    .and_then(|channel_config| channel_config.mirror_channel)
+            })
         };
 
         macro_rules! video_too_large {
@@ -240,7 +239,7 @@ async fn mirror(msg: Message, state: State) -> anyhow::Result<()> {
                         .content(&format!(
                             "Posted by <@{}> at https://discord.com/channels/{}/{}/{}. Could upload video for {:?} due to file size constraints. You can download it yourself here: {}. Uploading only audio.",
                             msg.author.id,
-                            msg.guild_id.unwrap(),
+                            guild_id,
                             msg.channel_id,
                             msg.id,
                             clip_url,
@@ -263,7 +262,7 @@ async fn mirror(msg: Message, state: State) -> anyhow::Result<()> {
                         .reply(msg.id)
                         .content(&format!(
                             "Audio mirror can be found at https://discord.com/channels/{}/{}/{}",
-                            msg.guild_id.unwrap(),
+                            guild_id,
                             mirror_message.channel_id,
                             mirror_message.id,
                         ))?
@@ -597,7 +596,7 @@ async fn handle_command(msg: Message, state: State) -> anyhow::Result<()> {
         }
         "mirror" => {
             if let Some(referenced_message) = msg.referenced_message {
-                mirror(*referenced_message, state).await?;
+                mirror(*referenced_message, msg.guild_id.unwrap(), state).await?;
             } else {
                 state
                     .http
